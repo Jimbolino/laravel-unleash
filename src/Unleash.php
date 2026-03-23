@@ -40,6 +40,7 @@ class Unleash
             return [];
         }
 
+        $data = [];
         try {
             if ($this->config->get('unleash.cache.isEnabled')) {
                 $data = $this->getCachedFeatures();
