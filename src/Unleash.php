@@ -2,6 +2,8 @@
 
 namespace MikeFrancis\LaravelUnleash;
 
+use Closure;
+use GuzzleHttp\ClientInterface;
 use GuzzleHttp\Exception\TransferException;
 use Illuminate\Contracts\Cache\Repository as Cache;
 use Illuminate\Contracts\Config\Repository as Config;
@@ -21,13 +23,34 @@ class Unleash
     protected $request;
     protected $features;
     protected $expires;
+    protected ?FeatureFile $file;
+    protected ?Closure $defer;
+    private bool $refreshQueued = false;
 
-    public function __construct(Client $client, Cache $cache, Config $config, Request $request)
-    {
+    /**
+     * The client and the cache may be closures that build them: reading flags from the feature file
+     * needs neither, only fetching does.
+     *
+     * @param ClientInterface|Closure(): ClientInterface $client
+     * @param Cache|Closure(): Cache $cache holds the failover copy, shared by every machine
+     * @param ?FeatureFile $file required for caching (unleash.cache.isEnabled)
+     * @param ?Closure(Closure): void $defer runs the refresh of a stale feature file; when it is null,
+     *                                       the refresh runs right away
+     */
+    public function __construct(
+        ClientInterface|Closure $client,
+        Cache|Closure $cache,
+        Config $config,
+        Request $request,
+        ?FeatureFile $file = null,
+        ?Closure $defer = null
+    ) {
         $this->client = $client;
         $this->cache = $cache;
         $this->config = $config;
         $this->request = $request;
+        $this->file = $file;
+        $this->defer = $defer;
     }
 
     public function getFeatures(): array
@@ -40,21 +63,14 @@ class Unleash
             return [];
         }
 
-        $data = [];
-        try {
-            if ($this->config->get('unleash.cache.isEnabled')) {
-                $data = $this->getCachedFeatures();
-            } else {
-                $data = $this->fetchFeatures();
-            }
-        } catch (TransferException | JsonException) {
-            if ($this->config->get('unleash.cache.failover') === true) {
-                $data = $this->cache->get('unleash.failover', []);
-            }
+        if ($this->config->get('unleash.cache.isEnabled') && $this->file !== null) {
+            $data = $this->getCachedFeatures($this->file);
+        } else {
+            $data = $this->fetchFeaturesWithFailover();
         }
 
-        $this->features = Arr::get($data, 'features', []);
-        $this->expires = Arr::get($data, 'expires', $this->getExpires());
+        $this->features = $data['features'];
+        $this->expires = $data['expires'];
 
         return $this->features;
     }
@@ -119,21 +135,59 @@ class Unleash
         return !$this->isFeatureEnabled($name, ...$args);
     }
 
+    /**
+     * Fetch the flags into the feature file now, unless another process holds the lock or has
+     * refreshed the file since this process read it.
+     */
     public function refreshCache()
     {
-        if ($this->config->get('unleash.isEnabled') && $this->config->get('unleash.cache.isEnabled')) {
-            $this->fetchFeatures();
+        $file = $this->file;
+        if (!$this->config->get('unleash.isEnabled') || !$this->config->get('unleash.cache.isEnabled') || !$file) {
+            return;
         }
+
+        $file->withLock(function () use ($file): void {
+            $current = $file->read();
+            if ($current === null || $current['expires'] <= $this->getExpires()) {
+                $this->refreshFeatureFile($file, $current);
+            }
+        }, false);
     }
 
     protected function isFresh(): bool
     {
-        return $this->expires > time();
+        return is_array($this->features) && $this->expires > time();
     }
 
-    protected function getCachedFeatures(): array
+    /**
+     * Flags come from the feature file. A stale file is still served while it gets refreshed (after
+     * the response, see $defer), so a request never waits for the Unleash server. Only a missing file
+     * is filled before answering, by the first process to get the lock; the others wait and read it.
+     *
+     * @return array{features: array, expires: int}
+     */
+    protected function getCachedFeatures(FeatureFile $file): array
     {
-        return $this->cache->get('unleash.cache', function () {return $this->fetchFeatures();});
+        $data = $file->read();
+
+        if ($data === null) {
+            $file->withLock(function () use ($file, &$data): void {
+                $data = $file->read() ?? $this->refreshFeatureFile($file, null);
+            }, true);
+
+            return $data ?? $this->refreshFeatureFile($file, null);
+        }
+
+        if ($data['expires'] <= time()) {
+            $this->queueRefresh($file);
+            // a refresh that ran right away (no $defer) is visible at once
+            $data = $file->read() ?? $data;
+            if ($data['expires'] <= time()) {
+                $data['expires'] = time() + 1; // the refresh is queued or running elsewhere: look again soon
+            }
+        }
+
+        return $data;
     }
 
     public function getCacheTTL(): int
@@ -148,22 +202,117 @@ class Unleash
 
     public function getExpires(): int
     {
-        return $this->expires ?? $this->setExpires();
+        return $this->expires ?? $this->getCacheTTL() + time();
     }
 
     protected function fetchFeatures(): array
     {
-        $response = $this->client->get($this->config->get('unleash.featuresEndpoint'));
+        $response = $this->client()->request('GET', $this->config->get('unleash.featuresEndpoint'));
 
         $data = (array) json_decode((string)$response->getBody(), true, 512, JSON_BIGINT_AS_STRING + JSON_THROW_ON_ERROR);
 
         $data['expires'] = $this->setExpires();
 
-        $this->cache->set('unleash.cache', $data, $this->getCacheTTL());
-        $this->cache->forever('unleash.failover', $data);
+        if ($this->config->get('unleash.cache.failover') === true) {
+            $this->cache()->forever('unleash.failover', $data);
+        }
 
         $this->features = Arr::get($data, 'features', []);
 
         return $data;
+    }
+
+    private function queueRefresh(FeatureFile $file): void
+    {
+        if ($this->refreshQueued) {
+            return;
+        }
+        $this->refreshQueued = true;
+
+        $refresh = function () use ($file): void {
+            $this->refreshQueued = false;
+            $file->withLock(function () use ($file): void {
+                $current = $file->read();
+                if ($current === null || $current['expires'] <= time()) {
+                    $this->refreshFeatureFile($file, $current);
+                }
+            }, false);
+        };
+
+        if ($this->defer !== null) {
+            ($this->defer)($refresh);
+        } else {
+            $refresh();
+        }
+    }
+
+    /**
+     * Fetch the flags into the feature file for the next ttl. When the Unleash server cannot be
+     * reached, keep the flags we had (or the failover copy) and only try again after that ttl, instead
+     * of on every request.
+     *
+     * @param ?array{features: array, expires: int} $current
+     * @return array{features: array, expires: int}
+     */
+    private function refreshFeatureFile(FeatureFile $file, ?array $current): array
+    {
+        try {
+            $features = Arr::get($this->fetchFeatures(), 'features', []);
+        } catch (TransferException | JsonException) {
+            $features = [];
+            if ($this->config->get('unleash.cache.failover') === true) {
+                $features = $current['features'] ?? $this->getFailoverFeatures();
+            }
+        }
+
+        $expires = time() + $this->getCacheTTL();
+        $file->write($features, $expires);
+
+        return ['features' => $features, 'expires' => $expires];
+    }
+
+    /**
+     * Without caching, every fetch goes to the Unleash server, falling back to the failover copy.
+     *
+     * @return array{features: array, expires: int}
+     */
+    private function fetchFeaturesWithFailover(): array
+    {
+        try {
+            $features = Arr::get($this->fetchFeatures(), 'features', []);
+        } catch (TransferException | JsonException) {
+            $features = $this->config->get('unleash.cache.failover') === true ? $this->getFailoverFeatures() : [];
+        }
+
+        return ['features' => $features, 'expires' => $this->getExpires()];
+    }
+
+    private function getFailoverFeatures(): array
+    {
+        return Arr::get($this->cache()->get('unleash.failover', []), 'features', []);
+    }
+
+    private function client(): ClientInterface
+    {
+        $client = $this->client;
+        if ($client instanceof Closure) {
+            $client = $client();
+            $this->client = $client;
+        }
+        assert($client instanceof ClientInterface);
+
+        return $client;
+    }
+
+    private function cache(): Cache
+    {
+        $cache = $this->cache;
+        if ($cache instanceof Closure) {
+            $cache = $cache();
+            $this->cache = $cache;
+        }
+        assert($cache instanceof Cache);
+
+        return $cache;
     }
 }

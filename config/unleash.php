@@ -28,12 +28,16 @@ return [
 
   // Allow the Unleash API response to be cached.
   // Default TTL is 15s
-  // Failover caching will use the last successful result from Unleash if it down.
+  // The cache is a local file per machine, by default in the temp dir. A stale file keeps being served
+  // while one process refreshes it; web requests do that after their response has been sent.
+  // Failover caching will use the last successful result from Unleash if it down. The failover copy
+  // lives in the Laravel cache, so a machine without a feature file can fall back on it too.
   // Failover is independent of regular caching.
   'cache' => [
     'isEnabled' => env('UNLEASH_CACHE_ENABLED', false),
     'ttl' => env('UNLEASH_CACHE_TTL', 15),
     'failover' => env('UNLEASH_CACHE_FAILOVER', true),
+    'path' => env('UNLEASH_CACHE_PATH'),
   ],
 
   // Mapping of strategies used to guard features on Unleash. The default strategies are already

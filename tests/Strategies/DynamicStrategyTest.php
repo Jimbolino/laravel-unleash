@@ -93,48 +93,23 @@ class DynamicStrategyTest extends TestCase
      */
     protected function getMockConfig(\PHPUnit\Framework\MockObject\MockObject $strategy)
     {
-        $config = $this->createMock(Config::class);
+        $values = [
+            'unleash.isEnabled' => true,
+            'unleash.cache.isEnabled' => false,
+            'unleash.cache.failover' => false,
+            'unleash.featuresEndpoint' => '/api/client/features',
+            'unleash.strategies' => [
+                'testStrategy' => function () use ($strategy) {
+                    return $strategy;
+                },
+            ],
+        ];
 
-        $config->expects($this->at(0))
-            ->method('get')
-            ->with('unleash.isEnabled')
-            ->willReturn(true);
-        $config->expects($this->at(1))
-            ->method('get')
-            ->with('unleash.cache.isEnabled')
-            ->willReturn(false);
-        $config->expects($this->at(2))
-            ->method('get')
-            ->with('unleash.featuresEndpoint')
-            ->willReturn('/api/client/features');
-        $config->expects($this->at(3))
-            ->method('get')
-            ->with('unleash.strategies')
-            ->willReturn(
-                [
-                    'testStrategy' => function () use ($strategy) {
-                        return $strategy;
-                    },
-                ]
-            );
-        $config->expects($this->at(4))
-            ->method('get')
-            ->with('unleash.isEnabled')
-            ->willReturn(true);
-        $config->expects($this->at(5))
-            ->method('get')
-            ->with('unleash.cache.isEnabled')
-            ->willReturn(false);
-        $config->expects($this->at(6))
-            ->method('get')
-            ->with('unleash.strategies')
-            ->willReturn(
-                [
-                    'testStrategy' => function () use ($strategy) {
-                        return $strategy;
-                    },
-                ]
-            );
+        $config = $this->createMock(Config::class);
+        $config->method('get')->willReturnCallback(function ($key, $default = null) use ($values) {
+            return array_key_exists($key, $values) ? $values[$key] : $default;
+        });
+
         return $config;
     }
 
