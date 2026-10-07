@@ -49,14 +49,20 @@ class ServiceProvider extends IlluminateServiceProvider
             $blade->if(
                 'featureEnabled',
                 function (string $feature) {
-                    return app(Unleash::class)->isFeatureEnabled($feature);
+                    $unleash = app(Unleash::class);
+                    assert($unleash instanceof Unleash);
+
+                    return $unleash->isFeatureEnabled($feature);
                 }
             );
 
             $blade->if(
                 'featureDisabled',
                 function (string $feature) {
-                    return !app(Unleash::class)->isFeatureEnabled($feature);
+                    $unleash = app(Unleash::class);
+                    assert($unleash instanceof Unleash);
+
+                    return !$unleash->isFeatureEnabled($feature);
                 }
             );
         });
