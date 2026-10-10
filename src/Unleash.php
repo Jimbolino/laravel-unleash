@@ -59,7 +59,7 @@ class Unleash
             return $this->features;
         }
 
-        if (!$this->config->get('unleash.isEnabled')) {
+        if (empty($this->config->get('unleash.isEnabled'))) {
             return [];
         }
 
@@ -92,7 +92,7 @@ class Unleash
         $feature = $this->getFeature($name);
         $isEnabled = Arr::get($feature, 'enabled', false);
 
-        if (!$isEnabled) {
+        if (empty($isEnabled)) {
             return false;
         }
 
