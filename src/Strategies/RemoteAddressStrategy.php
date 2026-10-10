@@ -19,6 +19,6 @@ class RemoteAddressStrategy implements Strategy
 
         $remoteAddresses = explode(',', $remoteAddressesString);
 
-        return in_array($request->ip(), $remoteAddresses);
+        return in_array($request->ip(), $remoteAddresses, true);
     }
 }

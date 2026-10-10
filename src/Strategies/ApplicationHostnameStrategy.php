@@ -14,6 +14,6 @@ class ApplicationHostnameStrategy implements Strategy
 
         $hostNames = explode(',', $hostNamesString);
 
-        return $hostNamesString && in_array($request->getHost(), $hostNames);
+        return $hostNamesString && in_array($request->getHost(), $hostNames, true);
     }
 }

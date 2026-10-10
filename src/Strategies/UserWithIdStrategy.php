@@ -16,6 +16,6 @@ class UserWithIdStrategy implements Strategy
             return false;
         }
 
-        return in_array($user->getAuthIdentifier(), $userIds);
+        return in_array($user->getAuthIdentifier(), $userIds, false);
     }
 }
