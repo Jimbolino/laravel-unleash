@@ -17,6 +17,7 @@ use MikeFrancis\LaravelUnleash\Tests\Stubs\ImplementedStrategyThatIsDisabled;
 use MikeFrancis\LaravelUnleash\Tests\Stubs\NonImplementedStrategy;
 use MikeFrancis\LaravelUnleash\Unleash;
 use PHPUnit\Framework\TestCase;
+use RuntimeException;
 
 class UnleashTest extends TestCase
 {
@@ -24,6 +25,7 @@ class UnleashTest extends TestCase
 
     private MockHandler $mockHandler;
     private array $cacheStore = [];
+    private bool $cacheIsDown = false;
     private string $path;
     /** @var Closure[] */
     private array $deferred = [];
@@ -266,6 +268,35 @@ class UnleashTest extends TestCase
         $this->assertFalse((new FeatureFile($this->path))->read()['features'][0]['enabled']);
     }
 
+    public function testACacheOutageDoesNotCostTheFetchedFlags()
+    {
+        $this->cacheIsDown = true;
+        $this->respondWith([['name' => self::FEATURE, 'enabled' => true]]);
+
+        $this->assertTrue($this->unleash()->isFeatureEnabled(self::FEATURE));
+        $this->assertTrue((new FeatureFile($this->path))->read()['features'][0]['enabled']);
+    }
+
+    public function testACacheOutageDoesNotStopTheRefresh()
+    {
+        (new FeatureFile($this->path))->write([['name' => self::FEATURE, 'enabled' => true]], time() - 1);
+        $this->cacheIsDown = true;
+        $this->respondWith([['name' => self::FEATURE, 'enabled' => false]]);
+
+        $this->unleash()->getFeatures();
+        $this->runDeferred();
+
+        $this->assertFalse((new FeatureFile($this->path))->read()['features'][0]['enabled']);
+    }
+
+    public function testWithUnleashAndTheCacheDownAMissingFileDisablesFeatures()
+    {
+        $this->cacheIsDown = true;
+        $this->mockHandler->append(new Response(500));
+
+        $this->assertTrue($this->unleash()->isFeatureDisabled(self::FEATURE));
+    }
+
     public function testAskingForTheExpiryDoesNotSkipLoadingTheFlags()
     {
         (new FeatureFile($this->path))->write([['name' => self::FEATURE, 'enabled' => true]], time() + 15);
@@ -317,6 +348,13 @@ class UnleashTest extends TestCase
     private function cache(): Cache
     {
         $cache = $this->createMock(Cache::class);
+        if ($this->cacheIsDown) {
+            foreach (['get', 'forever'] as $method) {
+                $cache->method($method)->willThrowException(new RuntimeException('Connection refused'));
+            }
+
+            return $cache;
+        }
         $cache->method('get')->willReturnCallback(fn ($key, $default = null) => $this->cacheStore[$key] ?? $default);
         $cache->method('forever')->willReturnCallback(function ($key, $value) {
             $this->cacheStore[$key] = $value;

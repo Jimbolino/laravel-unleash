@@ -12,6 +12,7 @@ use Illuminate\Support\Arr;
 use JsonException;
 use MikeFrancis\LaravelUnleash\Strategies\Contracts\DynamicStrategy;
 use MikeFrancis\LaravelUnleash\Strategies\Contracts\Strategy;
+use Throwable;
 
 class Unleash
 {
@@ -214,7 +215,7 @@ class Unleash
         $data['expires'] = $this->setExpires();
 
         if ($this->config->get('unleash.cache.failover') === true) {
-            $this->cache()->forever('unleash.failover', $data);
+            $this->storeFailoverCopy($data);
         }
 
         $this->features = Arr::get($data, 'features', []);
@@ -287,9 +288,31 @@ class Unleash
         return ['features' => $features, 'expires' => $this->getExpires()];
     }
 
+    /**
+     * The flags of the failover copy, none when there is no copy or no cache to ask.
+     */
     private function getFailoverFeatures(): array
     {
-        return Arr::get($this->cache()->get('unleash.failover', []), 'features', []);
+        try {
+            $copy = $this->cache()->get('unleash.failover');
+        } catch (Throwable) {
+            return [];
+        }
+
+        return is_array($copy) && is_array($copy['features'] ?? null) ? $copy['features'] : [];
+    }
+
+    /**
+     * The copy is only a fallback: a cache that is down must not cost the flags that were just fetched,
+     * nor stop them from reaching the feature file.
+     */
+    private function storeFailoverCopy(array $data): void
+    {
+        try {
+            $this->cache()->forever('unleash.failover', $data);
+        } catch (Throwable) {
+            // the next fetch stores it again
+        }
     }
 
     private function client(): ClientInterface
