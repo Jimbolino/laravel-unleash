@@ -36,11 +36,12 @@ class FeatureFile
     public function write(array $features, int $expires): bool
     {
         $json = json_encode(['features' => $features, 'expires' => $expires]);
-        $tmp = $this->path . '.' . uniqid('', true) . '.tmp';
-        if ($json === false || @file_put_contents($tmp, $json) === false) {
+        if ($json === false) {
             return false;
         }
-        if (!@rename($tmp, $this->path)) {
+        // on a full disk the temporary file gets created but not filled: never leave it behind
+        $tmp = $this->path . '.' . uniqid('', true) . '.tmp';
+        if (@file_put_contents($tmp, $json) === false || !@rename($tmp, $this->path)) {
             @unlink($tmp);
 
             return false;
