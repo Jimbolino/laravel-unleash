@@ -84,7 +84,7 @@ class ServiceProvider extends IlluminateServiceProvider
     private function getFeatureFilePath(): string
     {
         $path = $this->app->make(Config::class)->get('unleash.cache.path');
-        if ($path) {
+        if (!empty($path)) {
             return $path;
         }
 
